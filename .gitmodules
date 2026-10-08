@@ -1,3 +1,12 @@
 [submodule "experiment_helpers"]
 	path = experiment_helpers
 	url = https://github.com/jamesBaker361/experiment_helpers.git
+[submodule "overcomplete"]
+	path = overcomplete
+	url = https://github.com/KempnerInstitute/overcomplete.git
+[submodule "RAE"]
+	path = RAE
+	url = https://github.com/bytetriper/RAE.git
+[submodule "sam3_repo"]
+	path = sam3_repo
+	url = https://github.com/facebookresearch/sam3.git
