@@ -98,13 +98,15 @@ def default_repo_id(dataset: str, space: str, arm: str) -> str:
 def find_dir(root: str, name: str) -> str:
     '''First directory called `name` under root (archives differ in their top-level folder).'''
     for dirpath, dirnames, _ in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d != "__MACOSX")  # macOS zips mirror the tree with ._ files
         if name in dirnames:
             return os.path.join(dirpath, name)
     raise FileNotFoundError(f"no directory named {name} under {root}")
 
 
 def find_file(root: str, name: str) -> str:
-    for dirpath, _, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d != "__MACOSX")
         if name in filenames:
             return os.path.join(dirpath, name)
     raise FileNotFoundError(f"no file named {name} under {root}")
@@ -117,7 +119,7 @@ def load_json(path: str):
 
 def save_json(path: str, obj):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = path + ".tmp"
+    tmp = f"{path}.{os.getpid()}.tmp"  # per process: concurrent SAM3 shards may write meta.json at once
     with open(tmp, "w") as f:
         json.dump(obj, f, indent=1)
     os.replace(tmp, path)
@@ -293,6 +295,8 @@ class BlockSAE(nn.Module):
         n_dead = int(dead.sum())
         aux = nmse.new_zeros(())
         if n_dead > 0:
+            if x.requires_grad:  # inline arm: AuxK trains the SAE only, never the UNet
+                pre, _ = self.sae.encoder(x.detach() - self.b_dec)
             pre_dead = torch.relu(pre.float()).masked_fill(~dead, 0.0)
             top = torch.topk(pre_dead, min(k_aux, n_dead), dim=-1)
             z_aux = torch.zeros_like(pre_dead).scatter(-1, top.indices, top.values)
@@ -301,6 +305,11 @@ class BlockSAE(nn.Module):
             aux = (resid - e_hat).pow(2).sum(-1).mean() / resid.pow(2).sum(-1).mean().clamp_min(1e-8)
         return {"nmse": nmse, "aux": aux, "dead_frac": n_dead / self.n_latents,
                 "l0": float((z > 0).float().sum(-1).mean())}
+
+
+def index_dtype(n_latents: int):
+    '''Smallest torch int type that holds latent indices (codes are stored as top-k index/value pairs).'''
+    return torch.int16 if n_latents <= torch.iinfo(torch.int16).max + 1 else torch.int32
 
 
 def make_saes(unet, sites, expansion: int, k: int) -> nn.ModuleDict:
@@ -316,10 +325,13 @@ class SAEHooks:
       "capture": only record the activation (post-hoc SAE training)
     After each forward, self.records[site] is (x, pre, z, xh), or x in capture mode,
     with x of shape (B*8*8, C) in (b, h, w) order.
+    self.inject[site] (a (C,) vector, e.g. strength * a dictionary row) is added
+    to the site's output at every patch, after the SAE (EPR edits). The
+    recorded x is always the activation before the injection.
     '''
 
     def __init__(self, unet, saes: nn.ModuleDict = None, sites=SITES, mode: str = "inline"):
-        self.saes, self.mode, self.records = saes, mode, {}
+        self.saes, self.mode, self.records, self.inject = saes, mode, {}, {}
         modules = sae_site_modules(unet)
         self.handles = [modules[s].register_forward_hook(self._make(s)) for s in sites]
 
@@ -333,9 +345,11 @@ class SAEHooks:
             xin = x if self.mode == "inline" else x.detach()
             pre, z, xh = self.saes[site](xin)
             self.records[site] = (xin, pre, z, xh)
-            if self.mode == "inline":
-                return xh.to(out.dtype).reshape(b, h, w, c).permute(0, 3, 1, 2)
-            return None
+            y = xh.to(out.dtype).reshape(b, h, w, c).permute(0, 3, 1, 2) if self.mode == "inline" else out
+            add = self.inject.get(site)
+            if add is not None:
+                y = y + add.to(y.dtype).view(1, -1, 1, 1)
+            return y if (self.mode == "inline" or add is not None) else None
         return hook
 
     def remove(self):

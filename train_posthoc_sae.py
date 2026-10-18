@@ -64,11 +64,13 @@ def main(args):
                                          batch_size=args.batch_size, shuffle=True, drop_last=True,
                                          num_workers=args.num_workers, persistent_workers=args.num_workers > 0)
     optimizer = torch.optim.AdamW(saes.parameters(), lr=args.lr, weight_decay=0.0)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / args.lr_warmup_steps))
+    step_offset = (start_epoch - 1) * len(loader)  # a resumed run shouldn't redo the LR warmup
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lambda s: min(1.0, (s + 1 + step_offset) / args.lr_warmup_steps))
     optimizer, loader, scheduler = accelerator.prepare(optimizer, loader, scheduler)
     hooks = SAEHooks(unet, None, sites, mode="capture")
 
-    global_step = (start_epoch - 1) * len(loader)
+    global_step = step_offset
     for epoch in range(start_epoch, args.epochs + 1):
         start = time.time()
         for x0 in loader:

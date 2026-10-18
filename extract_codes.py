@@ -18,7 +18,7 @@ import numpy as np
 import torch
 
 from common import (DEFAULT_DATA_ROOT, DATASETS, SPACES, PATCH_GRID, load_unet_and_saes, SAEHooks, noisy,
-                    predict_v, image_noise, latents_path, meta_path, load_json, save_json, split_indices,
+                    predict_v, image_noise, index_dtype, latents_path, meta_path, load_json, save_json, split_indices,
                     run_dir, codes_dir)
 
 parser = argparse.ArgumentParser()
@@ -54,7 +54,7 @@ def extract(args, unet, hooks, sites, latents, indices, device) -> dict:
         for s in sites:
             x, _, z, _ = hooks.records[s]
             top = torch.topk(z.float(), hooks.saes[s].k, dim=-1)
-            out[f"{s}_idx"].append(top.indices.to(torch.int16).cpu().numpy())
+            out[f"{s}_idx"].append(top.indices.to(index_dtype(hooks.saes[s].n_latents)).cpu().numpy())
             out[f"{s}_val"].append(top.values.half().cpu().numpy())
             if not args.no_raw:
                 out[f"{s}_raw"].append(x.half().cpu().numpy())

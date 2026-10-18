@@ -4,9 +4,10 @@
 # its class fractions decide the labels (--coverage, default 0.5).
 #   binary:     one-vs-rest per mask class, positive if the class covers
 #               >= coverage of the patch. celeba: the 18 part classes;
-#               awa2: "animal" (any species). Per-latent 1D ridge logistic
-#               probes are fit on the train patches; the latent with the
-#               lowest train BCE and the latent with the highest train F1 are
+#               awa2: "animal" (any species) and each species. Per-latent 1D
+#               ridge logistic probes are fit on the train patches; the latent
+#               with the lowest train BCE and the latent with the highest
+#               train F1 (SAE codes: among positive-weight latents only) are
 #               each scored on the test patches (F1/precision/recall at 0.5,
 #               AUROC, BCE, loss explained vs the test prevalence).
 #   multiclass: patches whose majority class covers >= coverage (others are
@@ -34,7 +35,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score, accuracy_score, balanced_accuracy_score, f1_score
 from sklearn.preprocessing import StandardScaler
 
-from common import (DEFAULT_DATA_ROOT, DATASETS, SPACES, PATCH_GRID, LABEL_SIZE, BlockSAE, labels_path,
+from common import (DEFAULT_DATA_ROOT, DATASETS, SPACES, PATCH_GRID, LABEL_SIZE, BlockSAE, index_dtype, labels_path,
                     meta_path, load_json, codes_dir)
 from sparse_probe import (fit_sparse_1d_ridge_logistic, sparse_per_latent_confusion, fit_dense_1d_ridge_logistic,
                           precision_recall_f1, baseline_bce, latent_column, scaled_csr)
@@ -71,9 +72,11 @@ def patch_fractions(labels: np.ndarray, images: np.ndarray, n_classes: int) -> n
 
 
 def binary_tasks(dataset: str, classes: list, frac: np.ndarray, coverage: float) -> dict:
-    if dataset == "celeba":
-        return {name: frac[:, c] >= coverage for c, name in enumerate(classes) if c > 0}
-    return {"animal": (1.0 - frac[:, 0]) >= coverage}
+    '''celeba: one task per part class. awa2: "animal" plus one task per species (EPR needs a latent per species).'''
+    tasks = {name: frac[:, c] >= coverage for c, name in enumerate(classes) if c > 0}
+    if dataset == "awa2":
+        tasks = {"animal": (1.0 - frac[:, 0]) >= coverage, **tasks}
+    return tasks
 
 
 def multiclass_labels(frac: np.ndarray, coverage: float):
@@ -91,6 +94,17 @@ class Features:
         self.sparse = n_dirs is not None
 
 
+def standardize(train: np.ndarray, test: np.ndarray):
+    '''
+    z-score dense features with train statistics: a 1D logistic probe can
+    fit any affine rescaling of its feature equally well, but Newton's method
+    (no line search) is only well behaved on unit-scale inputs.
+    '''
+    train, test = np.asarray(train, dtype=np.float32), np.asarray(test, dtype=np.float32)
+    mean, std = train.mean(0), train.std(0) + 1e-6
+    return (train - mean) / std, (test - mean) / std
+
+
 def random_sae_codes(raw_train, raw_test, n_latents, k, seed):
     torch.manual_seed(seed)
     sae = BlockSAE(raw_train.shape[1], n_latents // raw_train.shape[1], k)
@@ -104,7 +118,7 @@ def random_sae_codes(raw_train, raw_test, n_latents, k, seed):
         for s in range(0, len(raw), 8192):
             _, z, _ = sae(torch.from_numpy(raw[s:s + 8192].astype(np.float32)))
             top = torch.topk(z, k, dim=-1)
-            idx.append(top.indices.to(torch.int16).numpy())
+            idx.append(top.indices.to(index_dtype(n_latents)).numpy())
             val.append(top.values.numpy())
         return np.concatenate(idx), np.concatenate(val)
     return encode(raw_train), encode(raw_test)
@@ -121,7 +135,7 @@ def load_features(directory: str, site: str, info: dict, wanted: list, seed: int
     if ("raw" in wanted or "random_sae" in wanted) and has_raw:
         raw_train, raw_test = np.asarray(ld("train", f"{site}_raw")), np.asarray(ld("test", f"{site}_raw"))
         if "raw" in wanted:
-            out.append(Features("raw", raw_train, raw_test))
+            out.append(Features("raw", *standardize(raw_train, raw_test)))
         if "random_sae" in wanted:
             tr, te = random_sae_codes(raw_train, raw_test, info["n_latents"], info["k"], seed)
             out.append(Features("random_sae", tr, te, info["n_latents"]))
@@ -161,6 +175,12 @@ def run_binary(feat: Features, tasks_train: dict, tasks_test: dict, args) -> lis
             w, b, loss, tp, fp, fn = fit_dense_1d_ridge_logistic(np.asarray(feat.train), y_train, args.ridge)
         _, _, f1 = precision_recall_f1(tp, fp, fn)
         base = baseline_bce(y_train)
+        if feat.sparse:
+            # a nonnegative code with a negative weight fires off the class; only "on" latents count
+            # (and only those can be injected for EPR). Dense features have no meaningful sign.
+            if not (w > 0).any():
+                continue
+            loss, f1 = np.where(w > 0, loss, np.inf), np.where(w > 0, f1, -1.0)
         for rule, j in (("bce", int(np.argmin(loss))), ("f1", int(np.argmax(f1)))):
             row = {"task": task, "selection": rule, "latent": j, "n_train_pos": int(y_train.sum()),
                    "n_test_pos": int(y_test.sum()), "train_bce": float(loss[j]),
@@ -241,8 +261,8 @@ def main(args):
         jobs = [(site, f) for site in (args.sites.split(",") if args.sites else info["sites"])
                 for f in load_features(directory, site, info, wanted, args.seed)]
         if "input" in wanted and not did_input:
-            jobs.append(("input", Features("input", np.load(os.path.join(directory, "train_input.npy")),
-                                           np.load(os.path.join(directory, "test_input.npy")))))
+            jobs.append(("input", Features("input", *standardize(np.load(os.path.join(directory, "train_input.npy")),
+                                                                 np.load(os.path.join(directory, "test_input.npy"))))))
             did_input = True
         for site, feat in jobs:
             key = {"dataset": args.dataset, "space": args.space, "arm": "-" if feat.name == "input" else arm,

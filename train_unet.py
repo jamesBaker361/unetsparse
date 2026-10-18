@@ -92,7 +92,10 @@ def main(args):
 
     params = list(unet.parameters()) + (list(saes.parameters()) if saes is not None else [])
     optimizer = torch.optim.AdamW(params, lr=args.lr, weight_decay=0.0)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda s: min(1.0, (s + 1) / args.lr_warmup_steps))
+    # optimizer moments aren't checkpointed, but a resumed run shouldn't redo the LR warmup
+    step_offset = (start_epoch - 1) * len(loader) // args.gradient_accumulation_steps
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lambda s: min(1.0, (s + 1 + step_offset) / args.lr_warmup_steps))
     if saes is not None:
         # the hooks call the SAEs directly, so a DDP wrapper around them would never sync their grads
         assert accelerator.num_processes == 1, "the inline arm is single-GPU only"
@@ -103,7 +106,7 @@ def main(args):
     hooks = SAEHooks(raw_unet, raw_saes, sites, mode="side") if saes is not None else None
     space = Space(args.space, device) if accelerator.is_main_process else None
 
-    global_step = (start_epoch - 1) * len(loader) // args.gradient_accumulation_steps
+    global_step = step_offset
     for epoch in range(start_epoch, args.epochs + 1):
         start = time.time()
         for x0 in loader:

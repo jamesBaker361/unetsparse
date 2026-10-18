@@ -91,7 +91,7 @@ def awa2_meta(args) -> dict:
     images, image_species = [], []
     for s, name in enumerate(species):
         for fn in sorted(os.listdir(os.path.join(jpeg_dir, name))):
-            if fn.lower().endswith((".jpg", ".jpeg", ".png")):
+            if fn.lower().endswith((".jpg", ".jpeg", ".png")) and not fn.startswith("."):
                 images.append(os.path.relpath(os.path.join(jpeg_dir, name, fn), dataset_dir(args.data_root, "awa2")))
                 image_species.append(s)
     meta = {"dataset": "awa2", "images": images, "split": random_split(len(images), args.test_frac, args.seed),
@@ -133,7 +133,10 @@ def run_sam(args, meta: dict):
             score = float(scores.float().max().cpu())
         frac = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize((LABEL_SIZE, LABEL_SIZE),
                                                                               Image.BOX)) / 255.0
-        np.savez_compressed(sam_cache(args.data_root, i), mask=frac >= 0.5, score=score)
+        # atomic: another shard may merge as soon as every cache file exists
+        tmp = sam_cache(args.data_root, i)[:-len(".npz")] + f".{os.getpid()}.tmp.npz"
+        np.savez_compressed(tmp, mask=frac >= 0.5, score=score)
+        os.replace(tmp, sam_cache(args.data_root, i))
         if n % 500 == 0:
             print(f"{n}/{len(todo)} {query} score={score:.3f} area={mask.mean():.3f}", flush=True)
 
