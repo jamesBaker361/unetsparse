@@ -24,6 +24,8 @@ Run from the repo root. Each `scripts/*.sh` submits one stage via `runpygpu_chip
 | 4 | `scripts/04_train_posthoc.sh` → `train_posthoc_sae.py` | `runs/{dataset}_{space}_posthoc/` |
 | 5 | `scripts/05_extract.sh` → `extract_codes.py` | `codes/{dataset}_{space}_{arm}_t0.1/` |
 | 6 | `scripts/06_probe.sh` → `probe.py` | `outputs/probe_binary.csv`, `outputs/probe_multiclass.csv` |
+| 7 | `scripts/07_classifiers.sh` → `train_classifier.py` | `runs/classifier_{dataset}/` (ResNet-50: celeba part presence, awa2 species) |
+| 8 | `scripts/08_epr.sh` → `epr.py` | `outputs/epr.csv`, `outputs/epr_panels/` |
 
 The probes compare four feature sets at each site:
 - `sae`: the arm's SAE codes.
@@ -32,7 +34,8 @@ The probes compare four feature sets at each site:
 - `input`: the input-latent patches. These don't depend on the arm or site.
 
 What the probes compute:
-- **Binary:** one-vs-rest per mask class. A patch is positive when the class covers at least 50% of it. A per-latent 1D ridge logistic probe is fit for every latent, and the best latent is chosen by train BCE and by train F1. Each chosen latent is then scored on test patches.
+- **Binary:** one-vs-rest per mask class (AwA2: "animal" and each species). A patch is positive when the class covers at least 50% of it. A per-latent 1D ridge logistic probe is fit for every latent, and the best latent is chosen by train BCE and by train F1. For SAE codes, only latents with a positive weight are eligible. Each chosen latent is then scored on test patches.
+- **EPR (Editing Precision Ratio, CASL Eq. 14):** inject each class's probe-selected latent into test images where the class is absent. The edit happens while denoising from t=0.5: add strength × (the latent's mean activation) × its decoder direction at its site. A trained image classifier then scores the edited image against the same image denoised without the edit. EPR = mean |Δ target logit| / mean |Δ other logits|. Random live latents injected the same way are the control. Rows also record the signed target gain, the classified-as rate, and PSNR against the unedited image. For CelebA the target logits are part presence; for AwA2 they are the species.
 - **Multiclass:** multinomial logistic regression on the patch's whole code. CelebA uses 19 classes; AwA2 uses 51 (background + 50 species).
 
 ## Setup

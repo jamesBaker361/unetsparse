@@ -101,7 +101,23 @@ def find_dir(root: str, name: str) -> str:
         dirnames[:] = sorted(d for d in dirnames if d != "__MACOSX")  # macOS zips mirror the tree with ._ files
         if name in dirnames:
             return os.path.join(dirpath, name)
-    raise FileNotFoundError(f"no directory named {name} under {root}")
+    raise FileNotFoundError(f"no directory named {name} under {root}\n{describe_raw(root)}")
+
+
+def describe_raw(root: str, max_entries: int = 20) -> str:
+    '''What is actually under a raw/ dir, for errors: download state + the top two levels.'''
+    if not os.path.isdir(root):
+        return f"{root} does not exist - run `python download_data.py` (stage 0) first"
+    zips = [f for f in os.listdir(root) if f.endswith((".zip", ".incomplete"))]
+    lines = ["extracted marker (.extracted): " + ("present" if os.path.exists(os.path.join(root, ".extracted"))
+                                                  else "MISSING - download_data.py has not finished extracting"),
+             f"archives here: {zips or 'none'}", "contents (2 levels):"]
+    for entry in sorted(os.listdir(root))[:max_entries]:
+        lines.append(f"  {entry}")
+        sub = os.path.join(root, entry)
+        if os.path.isdir(sub):
+            lines += [f"    {e}" for e in sorted(os.listdir(sub))[:max_entries]]
+    return "\n".join(lines)
 
 
 def find_file(root: str, name: str) -> str:
